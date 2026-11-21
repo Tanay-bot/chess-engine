@@ -10,6 +10,12 @@
  * that runs anywhere. We prefer the multi-threaded build because spreading a
  * short search across cores is both faster and stronger, and fall back to the
  * single-threaded build if it cannot boot.
+ *
+ * A worker whose script fails to load is retried once from the same URL with a
+ * query string (see `boot`). The engine also stays completely silent until its
+ * whole WASM module has arrived — even the banner is printed by the module — so
+ * booting waits out that silence instead of treating it as a failure; a first
+ * visit may still be downloading the 99 MB network.
  */
 
 export type EngineScore = { type: "cp" | "mate"; value: number };
@@ -40,8 +46,24 @@ type ActiveSearch = {
   resolve: (result: SearchResult) => void;
 };
 
-const STARTUP_TIMEOUT_MS = 240_000;
-const MULTI_STARTUP_TIMEOUT_MS = 30_000;
+/**
+ * How long a build may take to answer.
+ *
+ * Stockfish emits nothing at all until its WASM module has fully downloaded —
+ * the startup banner comes from the module, not from the worker script — so a
+ * slow first download is indistinguishable from a quiet engine. This deadline
+ * only exists to surface a worker that never answers, and has to be generous
+ * enough for ~99 MB on a slow connection.
+ */
+const BOOT_TIMEOUT_MS = 300_000;
+
+/** A worker whose script never loaded, as opposed to an engine that boots slowly. */
+class WorkerLoadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkerLoadError";
+  }
+}
 
 /** Leave one core for the UI, but never spawn a pointless pool. */
 function preferredThreads(): number {
@@ -147,26 +169,56 @@ export class StockfishEngine {
 
   /* --------------------------------------------------------------- internal */
 
+  /**
+   * Boot one build, retrying once from the same URL with a query string.
+   *
+   * On one machine `new Worker(".../stockfish-19-single.js")` failed with an
+   * error event that carried no message and a network log entry of
+   * net::ERR_BLOCKED_BY_RESPONSE, and kept failing after reloads, while the same
+   * file requested as `.../stockfish-19-single.js?v=2` loaded normally (and a
+   * fresh browser profile loaded the plain URL too). We never established why,
+   * so this is a cheap second attempt for a URL that will not load, not an
+   * explanation of the cause.
+   */
   private async boot(variant: EngineVariant): Promise<void> {
+    const file = variant === "multi" ? "stockfish-19.js" : "stockfish-19-single.js";
+    const base = new URL(`${import.meta.env.BASE_URL}engine/${file}`, window.location.href).href;
+    const urls = [base, `${base}?v=2`];
+
+    let failure: Error | null = null;
+    for (const url of urls) {
+      try {
+        await this.bootFrom(url, variant);
+        return;
+      } catch (cause) {
+        failure = cause instanceof Error ? cause : new Error(String(cause));
+        // A slow boot would only repeat the same wait; just a worker that never
+        // loaded is worth a second URL.
+        if (!(failure instanceof WorkerLoadError)) break;
+      }
+    }
+
+    throw failure ?? new Error("Could not start Stockfish.");
+  }
+
+  private async bootFrom(url: string, variant: EngineVariant): Promise<void> {
     this.teardownWorker();
     this.terminated = false;
     this.discardNextBestMove = false;
 
     const threads = variant === "multi" ? preferredThreads() : 1;
     const hash = variant === "multi" ? 512 : 256;
-    const file = variant === "multi" ? "stockfish-19.js" : "stockfish-19-single.js";
-    const workerUrl = new URL(`${import.meta.env.BASE_URL}engine/${file}`, window.location.href).href;
 
-    const worker = new Worker(workerUrl);
+    const worker = new Worker(url);
     this.worker = worker;
     this.currentInfo = { variant, threads, hash };
 
     worker.onmessage = (event: MessageEvent) => this.handleOutput(String(event.data));
-    worker.onerror = (event: ErrorEvent) => {
-      this.fail(event.message || "The Stockfish worker failed to load.");
+    worker.onerror = () => {
+      this.fail(new WorkerLoadError("The Stockfish worker failed to load."));
     };
     worker.onmessageerror = () => {
-      this.fail("The Stockfish worker sent an unreadable message.");
+      this.fail(new WorkerLoadError("The Stockfish worker sent an unreadable message."));
     };
 
     const failure = new Promise<never>((_, reject) => {
@@ -177,11 +229,7 @@ export class StockfishEngine {
     // module boots, so keep pinging until the handshake is answered.
     try {
       await Promise.race([
-        this.waitForLine(
-          (line) => line.includes("uciok"),
-          () => this.post("uci"),
-          variant === "multi" ? MULTI_STARTUP_TIMEOUT_MS : STARTUP_TIMEOUT_MS,
-        ),
+        this.waitForLine((line) => line.includes("uciok"), () => this.post("uci"), BOOT_TIMEOUT_MS),
         failure,
       ]);
 
@@ -197,7 +245,7 @@ export class StockfishEngine {
         this.waitForLine(
           (line) => line.includes("readyok"),
           () => this.post("isready"),
-          STARTUP_TIMEOUT_MS,
+          BOOT_TIMEOUT_MS,
         ),
         failure,
       ]);
@@ -315,18 +363,20 @@ export class StockfishEngine {
     });
   }
 
-  private fail(message: string): void {
+  private fail(cause: string | Error): void {
+    const error = cause instanceof Error ? cause : new Error(cause);
+
     const bootReject = this.bootReject;
     if (bootReject) {
       this.bootReject = null;
       this.teardownWorker();
-      bootReject(new Error(message));
+      bootReject(error);
       return;
     }
 
     if (this.terminated) return;
     this.terminated = true;
     this.teardownWorker();
-    this.onError?.(message);
+    this.onError?.(error.message);
   }
 }

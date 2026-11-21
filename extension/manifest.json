@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Best Move — Stockfish overlay",
+  "version": "1.2.0",
+  "description": "Reads the position on your own chess pages and shows Stockfish 19's best move for the side to move.",
+  "permissions": ["storage", "scripting", "activeTab"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Best Move",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["engine/stockfish-19-single.js", "engine/stockfish-19-single.wasm"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Best Move — allowed sites</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 40px 24px;
+        background: #0b0e13;
+        color: #e9edf3;
+        font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main {
+        max-width: 520px;
+        margin: 0 auto;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 26px;
+      }
+      .mark {
+        display: grid;
+        place-items: center;
+        width: 38px;
+        height: 38px;
+        border: 1px solid #25303f;
+        border-radius: 10px;
+        background: #0e1218;
+        color: #d9b877;
+        font-size: 19px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 650;
+        letter-spacing: 0.02em;
+      }
+      header p,
+      .hint {
+        margin: 2px 0 0;
+        font-size: 12px;
+        color: #7f8b9c;
+      }
+      fieldset,
+      form {
+        margin: 0 0 22px;
+      }
+      label,
+      h2 {
+        display: block;
+        margin: 0 0 7px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: #97a3b4;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+      }
+      input {
+        flex: 1;
+        min-width: 0;
+        padding: 9px 11px;
+        border: 1px solid #25303f;
+        border-radius: 8px;
+        background: #0e1218;
+        color: #e9edf3;
+        font: inherit;
+      }
+      input:focus {
+        outline: none;
+        border-color: #d9b877;
+      }
+      button {
+        padding: 9px 14px;
+        border: 1px solid #2b3648;
+        border-radius: 8px;
+        background: #131924;
+        color: #c3ccd9;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: #3a4859;
+        color: #e9edf3;
+      }
+      button.primary {
+        border-color: #d9b877;
+        background: #d9b877;
+        color: #16181c;
+        font-weight: 600;
+      }
+      button.primary:hover {
+        background: #e6c98d;
+      }
+      button.ghost {
+        padding: 4px 9px;
+        font-size: 12px;
+      }
+      .list {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        border: 1px solid #1c2431;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .list li {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border-top: 1px solid #1c2431;
+      }
+      .list li:first-child {
+        border-top: 0;
+      }
+      .list .site {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .list .tag {
+        font-size: 11px;
+        color: #6f7b8c;
+      }
+      .list .empty {
+        color: #6f7b8c;
+        font-size: 12.5px;
+      }
+      .status {
+        margin: -10px 0 18px;
+        font-size: 12.5px;
+        color: #4fc57e;
+      }
+      .status.bad {
+        color: #e2726e;
+      }
+      .hint {
+        margin-top: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <span class="mark" aria-hidden="true">♞</span>
+        <div>
+          <h1>Best Move</h1>
+          <p>Where the Stockfish overlay is allowed to run.</p>
+        </div>
+      </header>
+
+      <form id="add-form" autocomplete="off">
+        <label for="site">Add a chess site</label>
+        <div class="row">
+          <input id="site" type="text" placeholder="chess.example.com" spellcheck="false" />
+          <button class="primary" type="submit">Allow</button>
+        </div>
+        <p class="hint">A domain or full URL. Your browser asks once for access to that site.</p>
+      </form>
+
+      <p id="status" class="status" role="status" hidden></p>
+
+      <h2>Allowed sites</h2>
+      <ul id="list" class="list"></ul>
+      <p class="hint">Reload an open chess tab after changing this list. Alt+B toggles the overlay.</p>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

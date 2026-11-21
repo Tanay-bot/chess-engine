@@ -664,7 +664,13 @@ export default function App() {
             </div>
 
             <div className="board-frame">
-              <div className="board" onPointerDown={focusInput}>
+              {/* data-chess-fen is the hook the best-move extension reads. */}
+              <div
+                className="board"
+                onPointerDown={focusInput}
+                data-chess-fen={fen}
+                data-chess-turn={turn}
+              >
                 <Chessboard options={boardOptions} />
 
                 {pendingPromotion && (
