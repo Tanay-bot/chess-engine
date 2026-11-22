@@ -5,7 +5,7 @@
  * Worker and shows the engine's choice for the side to move, with the from/to
  * squares outlined on the board.
  *
- * Two board sources are understood:
+ * Four board sources are understood:
  *
  *  1. A FEN hook (preferred, exact): any element carrying a full FEN
  *       <div data-chess-fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1">
@@ -19,6 +19,11 @@
  *     class names the square (`piece wp square-52` is a white pawn on e2). The
  *     turn comes from the running clock, or from the move list, or the overlay
  *     asks; castling rights are inferred from the kings and rooks on home squares.
+ *
+ * 4. A lichess board: <cg-board> with one <piece class="white rook"> per piece,
+ *     whose transform is the square (`translate(177px, 0px)` is d8). The turn
+ *     comes from the running clock, or from the last-move squares, or the overlay
+ *     asks; castling rights are inferred the same way as on chess.com.
  *
  * It only runs where the extension is allowed: localhost from manifest.json plus
  * whatever the user adds on the extension's options page.
@@ -44,6 +49,8 @@
   let engineNote = "";
   let uciDone = false;
   let bootPing = 0;
+  let revivals = 0;
+  let crashFen = null; // a position the engine threw on; never sent twice
 
   let wantedFen = null;
   let activeFen = null;
@@ -371,16 +378,21 @@
     };
   }
 
-  // chess.com has no element per square, so highlights are placed from the
-  // board's own box: eight equal columns and rows inside it.
-  function chessComSquareRect(board, square) {
+  // Neither site has an element per square, so highlights are placed from the
+  // board's own box: eight equal columns and rows inside it. Both flip with a
+  // class - chess.com on the board, lichess on its wrapper.
+  function boardSquareRect(board, square) {
+    const wrap = board.closest(".cg-wrap");
+    const flipped = wrap
+      ? wrap.classList.contains("orientation-black")
+      : board.classList.contains("flipped");
     const box = board.getBoundingClientRect();
     const size = Math.min(box.width, box.height) / 8;
     if (!size) return null;
 
     let file = square.charCodeAt(0) - 97;
     let rank = Number(square[1]);
-    if (board.classList.contains("flipped")) {
+    if (flipped) {
       file = 7 - file;
       rank = 9 - rank;
     }
@@ -392,8 +404,88 @@
     };
   }
 
-  // Pieces move by having their class rewritten, so a board-level watcher on
-  // classes is what notices a move on chess.com.
+  /* ------------------------------------------------------------ lichess board */
+
+  // lichess draws one <piece> per piece inside <cg-board> and puts the square in
+  // its transform: `translate(177px, 0px)` is the d8 square of a 59px board.
+  // There is no square attribute and no FEN hook, so the board's own width gives
+  // the square size; flipping rewrites the transforms and marks the wrapper.
+  const LICHESS_CODE = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
+  const LICHESS_SHIFT = /translate\(\s*(-?[\d.]+)px[,\s]+(-?[\d.]+)px/;
+
+  function boardFromLichess() {
+    const board = document.querySelector("cg-board");
+    const wrap = board?.closest(".cg-wrap");
+    if (!board || !wrap) return null;
+
+    const pieces = [...board.querySelectorAll("piece")];
+    const box = board.getBoundingClientRect();
+    const size = box.width / 8;
+    if (!pieces.length || !size) return null;
+
+    const flipped = wrap.classList.contains("orientation-black");
+    const rows = new Map();
+    for (const piece of pieces) {
+      // The class list carries extra tokens while a piece is picked up
+      // (`dragging`), so colour and kind are looked up one token at a time.
+      const tokens = [...piece.classList];
+      const colour = tokens.find((token) => token === "white" || token === "black");
+      const kind = tokens.find((token) => LICHESS_CODE[token]);
+      if (!colour || !kind) continue;
+
+      // The inline transform is the piece's square even while it animates.
+      const shift = LICHESS_SHIFT.exec(piece.getAttribute("style") || "");
+      const rect = piece.getBoundingClientRect();
+      let file = Math.round((shift ? Number(shift[1]) : rect.left - box.left) / size);
+      let row = Math.round((shift ? Number(shift[2]) : rect.top - box.top) / size);
+      if (file < 0 || file > 7 || row < 0 || row > 7) continue;
+      if (flipped) {
+        file = 7 - file;
+        row = 7 - row;
+      }
+
+      const rank = 8 - row;
+      if (!rows.has(rank)) rows.set(rank, new Array(8).fill(null));
+      const code = LICHESS_CODE[kind];
+      rows.get(rank)[file] = colour === "white" ? code.toUpperCase() : code;
+    }
+
+    const placement = rows.size ? rowsToPlacement(rows) : null;
+    if (!placement) return null;
+
+    // With no clock and no move made yet, the start position is white's.
+    const turn = lichessTurn(board) ?? (placement === START_PLACEMENT ? "w" : null);
+    return {
+      fen: `${placement} ${turn ?? sideHint ?? "w"} ${castlingFromPlacement(placement)} - 0 1`,
+      turnKnown: turn !== null,
+      board,
+    };
+  }
+
+  function lichessTurn(board) {
+    // A live or reviewed game lights the clock of the side to move.
+    const running = document.querySelector(".rclock.running");
+    if (running) {
+      const names = String(running.className);
+      if (names.includes("rclock-white")) return "w";
+      if (names.includes("rclock-black")) return "b";
+    }
+
+    // Otherwise the last-move squares still hold the piece that just moved.
+    const at = new Map();
+    for (const piece of board.querySelectorAll("piece")) {
+      at.set(String(piece.getAttribute("style") || "").replace(/\s+/g, ""), String(piece.className));
+    }
+    for (const square of board.querySelectorAll("square.last-move")) {
+      const name = at.get(String(square.getAttribute("style") || "").replace(/\s+/g, ""));
+      if (name) return name.includes("white") ? "b" : "w";
+    }
+
+    return null;
+  }
+
+  // Pieces move by having their class (chess.com) or transform (lichess)
+  // rewritten, so a board-level watcher on both attributes notices a move.
   function watchBoard(board) {
     if (board === watchedBoard) return;
     boardWatch?.disconnect();
@@ -403,12 +495,12 @@
       subtree: true,
       childList: true,
       attributes: true,
-      attributeFilter: ["class"],
+      attributeFilter: ["class", "style"],
     });
   }
 
   function detect() {
-    return boardFromFen() ?? boardFromSquares() ?? boardFromChessCom();
+    return boardFromFen() ?? boardFromSquares() ?? boardFromChessCom() ?? boardFromLichess();
   }
 
   function pieceFromFen(fen, square) {
@@ -523,6 +615,7 @@
       if (line.includes("readyok")) {
         if (engineStatus !== "ready") {
           engineStatus = "ready";
+          revivals = 0;
           render();
           startSearch();
         }
@@ -611,7 +704,11 @@
     engineStatus = "error";
     engineNote = message;
     searching = false;
+    // Remember the position that threw, and drop it: the revived worker must not
+    // be handed the same board again.
+    crashFen = activeFen;
     activeFen = null;
+    wantedFen = null;
     if (bootPing) {
       window.clearInterval(bootPing);
       bootPing = 0;
@@ -623,6 +720,18 @@
       engineBlob = null;
     }
     render();
+
+    // A worker that throws is gone, and until now the overlay stayed dead with
+    // it. Give it a fresh worker instead - a few times, not forever.
+    if (revivals < 3) {
+      revivals += 1;
+      window.setTimeout(() => {
+        if (engineStatus !== "error") return;
+        engineStatus = "idle";
+        uciDone = false;
+        bootEngine();
+      }, 1500);
+    }
   }
 
   /* --------------------------------------------------------------- helpers */
@@ -688,7 +797,7 @@
 
     for (const square of [best.from, best.to]) {
       if (boardEl) {
-        addHighlight(chessComSquareRect(boardEl, square));
+        addHighlight(boardSquareRect(boardEl, square));
         continue;
       }
       const el = document.querySelector(`[data-square="${square}"]`);
@@ -753,6 +862,19 @@
 
   /* --------------------------------------------------------------- plumbing */
 
+  // Stockfish throws on a position that cannot exist, and one throw takes the
+  // worker with it. A page can show such a board for a moment - a promotion
+  // still to be chosen leaves a pawn on the last rank, and a board that is
+  // still drawing can lack a king - so only whole positions get searched.
+  function boardBlocker(fen) {
+    const ranks = fen.split(" ")[0].split("/");
+    if (ranks.length !== 8) return "Waiting for a complete board.";
+    if (/[pP]/.test(ranks[0] + ranks[7])) return "Choose a promotion piece.";
+    const pieces = ranks.join("/");
+    if (!pieces.includes("K") || !pieces.includes("k")) return "Waiting for a complete board.";
+    return null;
+  }
+
   function refresh(force = false) {
     if (!enabled) return;
 
@@ -790,6 +912,20 @@
       sideHint = sideHint === "w" ? "b" : "w";
     }
     lastPlacement = placement;
+
+    // A half-set board is shown as a note and searched the moment it is whole.
+    const blocker = fen === crashFen ? "Waiting for the next position." : boardBlocker(fen);
+    if (blocker) {
+      if (searching) post("stop");
+      searching = false;
+      activeFen = null;
+      wantedFen = null;
+      best = null;
+      engineNote = blocker;
+      render();
+      paintHighlights();
+      return;
+    }
 
     if (force || fen !== wantedFen) {
       wantedFen = fen;
