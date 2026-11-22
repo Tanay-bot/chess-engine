@@ -68,6 +68,7 @@
   let boardWatch = null;
   const boardResize = new ResizeObserver(() => paintHighlights());
   let watchedBoard = null;
+  let settleTimer = 0;
   let lastPlacement = null; // pieces only, so the turn cannot feed back into it
 
   /* --------------------------------------------------------------------- ui */
@@ -361,12 +362,24 @@
     return rights || "-";
   }
 
-  // Which sides have moved their king, read from the move list's notation: a
-  // king move or a castle both use the right up for good. The plies alternate
-  // white then black, the same order the turn estimator counts them in.
-  function chessComKingsMoved() {
+  // How much of the main line the board is showing: chess.com marks the ply you
+  // browsed to, and with nothing marked the list's own end is on the board.
+  function chessComShownPlies(placement) {
+    const plies = [...document.querySelectorAll(".main-line-ply")];
+    const selected = plies.findIndex((ply) => ply.querySelector(".selected"));
+    if (selected !== -1) return selected + 1;
+    // Unmarked, the board shows the end of the line, unless it still shows the
+    // position the game or analysis started from.
+    return placement === START_PLACEMENT ? 0 : plies.length;
+  }
+
+  // Which sides have moved their king in the plies shown: a king move or a
+  // castle both use the right up for good. Browsing back before the king moved
+  // must keep the right, so plies after the shown one are ignored. They
+  // alternate white then black, the same order the turn estimator counts them.
+  function chessComKingsMoved(shown) {
     const moved = {};
-    document.querySelectorAll(".main-line-ply").forEach((node, index) => {
+    [...document.querySelectorAll(".main-line-ply")].slice(0, shown).forEach((node, index) => {
       const san = node.textContent.trim();
       if (!san.startsWith("K") && !san.startsWith("O-O")) return;
       const side = node.classList.contains("white-move")
@@ -381,7 +394,7 @@
     return moved;
   }
 
-  function chessComTurn() {
+  function chessComTurn(shown) {
     // Live and daily games mark the clock of the side to move.
     const running = document.querySelector(".clock-player-turn");
     if (running) {
@@ -390,11 +403,9 @@
       if (names.includes("clock-black")) return "b";
     }
 
-    // Otherwise the move list says how many half moves were played: each played
-    // move is a `main-line-ply` node, so an odd count leaves black to move.
-    const list = document.querySelector("wc-simple-move-list, .move-list, .vertical-move-list");
-    const played = list ? list.querySelectorAll(".main-line-ply").length : 0;
-    if (played) return played % 2 === 1 ? "b" : "w";
+    // Otherwise the shown half moves say whose turn it is: an odd count leaves
+    // black to move.
+    if (shown) return shown % 2 === 1 ? "b" : "w";
 
     return null;
   }
@@ -405,10 +416,11 @@
     const placement = chessComPlacement(board);
     if (!placement) return null;
 
+    const shown = chessComShownPlies(placement);
     // With no clock and no moves played yet, the start position is white's.
-    const turn = chessComTurn() ?? (placement === START_PLACEMENT ? "w" : null);
+    const turn = chessComTurn(shown) ?? (placement === START_PLACEMENT ? "w" : null);
     return {
-      fen: `${placement} ${turn ?? sideHint ?? "w"} ${castlingFromPlacement(placement, chessComKingsMoved())} - 0 1`,
+      fen: `${placement} ${turn ?? sideHint ?? "w"} ${castlingFromPlacement(placement, chessComKingsMoved(shown))} - 0 1`,
       turnKnown: turn !== null,
       board,
     };
@@ -539,6 +551,7 @@
     boardResize.disconnect();
     if (board) boardResize.observe(board);
   }
+
 
   function detect() {
     return boardFromFen() ?? boardFromSquares() ?? boardFromChessCom() ?? boardFromLichess();
@@ -1001,6 +1014,10 @@
       return;
     }
 
+    // chess.com paints the pieces and the mark on the shown ply a moment apart,
+    // so an immediate read can see the new position with the old ply marked.
+    armSettle(fen);
+
     if (force || fen !== wantedFen) {
       wantedFen = fen;
       startSearch();
@@ -1013,6 +1030,19 @@
   function schedule() {
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => refresh(), DEBOUNCE_MS);
+  }
+
+  // The move list marks the shown ply a tick after the pieces move, so read
+  // again shortly after and keep the settled answer. Stops once the read stops
+  // changing, which keeps it from looping.
+  function armSettle(fen) {
+    window.clearTimeout(settleTimer);
+    settleTimer = window.setTimeout(() => {
+      settleTimer = 0;
+      if (!enabled) return;
+      const again = detect();
+      if (again && again.fen !== fen) refresh();
+    }, 200);
   }
 
   function toggle(next) {
