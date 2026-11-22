@@ -64,8 +64,9 @@
   let lastPaint = 0;
   let refreshTimer = 0;
 
-  let boardEl = null; // chess.com board the current position was read from
+  let boardEl = null; // chess.com or lichess board the position was read from
   let boardWatch = null;
+  const boardResize = new ResizeObserver(() => paintHighlights());
   let watchedBoard = null;
   let lastPlacement = null; // pieces only, so the turn cannot feed back into it
 
@@ -183,6 +184,19 @@
   const highlights = document.createElement("div");
   highlights.style.cssText =
     "position: fixed; inset: 0; pointer-events: none; z-index: 2147483000; margin: 0; padding: 0;";
+
+  // A squares pair alone leaves you hunting for the move, so the best move is
+  // drawn as an arrow as well. It is an SVG in the page itself rather than in the
+  // shadow root, so the arrowhead marker resolves and the coordinates are plain
+  // viewport pixels, exactly like the highlight boxes.
+  const arrows = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  arrows.style.cssText =
+    "position:fixed;left:0;top:0;pointer-events:none;overflow:visible;z-index:2147483000;";
+  arrows.innerHTML =
+    '<defs><marker id="best-move-arrow-head" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="2.6" markerHeight="2.6" orient="auto">' +
+    '<path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(217,184,119,0.92)"/></marker></defs>' +
+    '<line stroke="rgba(217,184,119,0.92)" stroke-linecap="round" marker-end="url(#best-move-arrow-head)" visibility="hidden"/>';
+  const arrowShaft = arrows.querySelector("line");
 
   root.querySelector(".close").addEventListener("click", () => toggle(false));
   sideEl.addEventListener("click", (event) => {
@@ -332,17 +346,39 @@
   }
 
   // The board does not say whether castling is still available, so it is
-  // inferred from the kings and rooks standing on their home squares.
-  function castlingFromPlacement(placement) {
+  // inferred from the kings and rooks standing on their home squares. A king
+  // that walked away and came back still looks castled by placement, so the
+  // caller can veto a side whose king the move list says has moved.
+  function castlingFromPlacement(placement, kingMoved = {}) {
     const at = (square) => pieceFromFen(`${placement} w - - 0 1`, square);
     let rights = "";
-    if (at("e1") === "K") {
+    if (at("e1") === "K" && !kingMoved.w) {
       rights += (at("h1") === "R" ? "K" : "") + (at("a1") === "R" ? "Q" : "");
     }
-    if (at("e8") === "k") {
+    if (at("e8") === "k" && !kingMoved.b) {
       rights += (at("h8") === "r" ? "k" : "") + (at("a8") === "r" ? "q" : "");
     }
     return rights || "-";
+  }
+
+  // Which sides have moved their king, read from the move list's notation: a
+  // king move or a castle both use the right up for good. The plies alternate
+  // white then black, the same order the turn estimator counts them in.
+  function chessComKingsMoved() {
+    const moved = {};
+    document.querySelectorAll(".main-line-ply").forEach((node, index) => {
+      const san = node.textContent.trim();
+      if (!san.startsWith("K") && !san.startsWith("O-O")) return;
+      const side = node.classList.contains("white-move")
+        ? "w"
+        : node.classList.contains("black-move")
+          ? "b"
+          : index % 2 === 0
+            ? "w"
+            : "b";
+      moved[side] = true;
+    });
+    return moved;
   }
 
   function chessComTurn() {
@@ -372,7 +408,7 @@
     // With no clock and no moves played yet, the start position is white's.
     const turn = chessComTurn() ?? (placement === START_PLACEMENT ? "w" : null);
     return {
-      fen: `${placement} ${turn ?? sideHint ?? "w"} ${castlingFromPlacement(placement)} - 0 1`,
+      fen: `${placement} ${turn ?? sideHint ?? "w"} ${castlingFromPlacement(placement, chessComKingsMoved())} - 0 1`,
       turnKnown: turn !== null,
       board,
     };
@@ -497,6 +533,11 @@
       attributes: true,
       attributeFilter: ["class", "style"],
     });
+
+    // The board can change size without the window doing so (a panel opening on
+    // chess.com), so the boxes and the arrow follow the board's own box.
+    boardResize.disconnect();
+    if (board) boardResize.observe(board);
   }
 
   function detect() {
@@ -767,7 +808,7 @@
       from,
       to,
       glyph: type ? GLYPH[type] : "♞",
-      name: type ? `${PIECE_NAME[type]} ${from}–${to}` : uci,
+      name: type ? `${PIECE_NAME[type]} ${from}–${to}${promo ? `=${promo.toUpperCase()}` : ""}` : uci,
       evalText: formatScore(score),
       depth,
       mover: fen.split(" ")[1] === "b" ? "Black" : "White",
@@ -791,17 +832,50 @@
     highlights.appendChild(box);
   }
 
+  // Where a square is on screen: from the board's own box on sites that draw no
+  // element per square, otherwise from the page's own square element.
+  function squareRect(square) {
+    if (boardEl) return boardSquareRect(boardEl, square);
+    const el = document.querySelector(`[data-square="${square}"]`);
+    return el ? el.getBoundingClientRect() : null;
+  }
+
+  function paintArrow() {
+    arrows.style.width = `${window.innerWidth}px`;
+    arrows.style.height = `${window.innerHeight}px`;
+
+    const from = enabled && best ? squareRect(best.from) : null;
+    const to = enabled && best ? squareRect(best.to) : null;
+    if (!from || !to) {
+      arrowShaft.setAttribute("visibility", "hidden");
+      return;
+    }
+
+    // Start clear of the moving piece and stop at the edge of the target square.
+    const size = from.width;
+    const x1 = from.left + size / 2;
+    const y1 = from.top + size / 2;
+    const x2 = to.left + size / 2;
+    const y2 = to.top + size / 2;
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const length = Math.hypot(dx, dy) || 1;
+
+    arrowShaft.setAttribute("stroke-width", String(Math.max(3, Math.round(size * 0.13))));
+    arrowShaft.setAttribute("x1", String(x1 + (dx / length) * size * 0.2));
+    arrowShaft.setAttribute("y1", String(y1 + (dy / length) * size * 0.2));
+    arrowShaft.setAttribute("x2", String(x2 - (dx / length) * size * 0.34));
+    arrowShaft.setAttribute("y2", String(y2 - (dy / length) * size * 0.34));
+    arrowShaft.setAttribute("visibility", "visible");
+  }
+
   function paintHighlights() {
     highlights.replaceChildren();
+    paintArrow();
     if (!enabled || !best) return;
 
     for (const square of [best.from, best.to]) {
-      if (boardEl) {
-        addHighlight(boardSquareRect(boardEl, square));
-        continue;
-      }
-      const el = document.querySelector(`[data-square="${square}"]`);
-      if (el) addHighlight(el.getBoundingClientRect());
+      addHighlight(squareRect(square));
     }
   }
 
@@ -945,17 +1019,18 @@
     enabled = next;
     chrome.storage.local.set({ enabled });
 
-    if (!enabled) {
-      best = null;
-      highlights.replaceChildren();
-    }
+    if (!enabled) best = null;
     render();
+    // The boxes and the arrow are cleared here, not by hand: clearing the boxes
+    // alone used to leave the arrow behind on the board.
+    paintHighlights();
     if (enabled) refresh(true);
   }
 
   function mount() {
     if (!host.isConnected) document.documentElement.appendChild(host);
     if (!highlights.isConnected) document.documentElement.appendChild(highlights);
+    if (!arrows.isConnected) document.documentElement.appendChild(arrows);
   }
 
   mount();
