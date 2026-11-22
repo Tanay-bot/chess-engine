@@ -68,7 +68,8 @@
   let boardWatch = null;
   const boardResize = new ResizeObserver(() => paintHighlights());
   let watchedBoard = null;
-  let settleTimer = 0;
+  let moveListWatch = null;
+  let markTimer = 0;
   let lastPlacement = null; // pieces only, so the turn cannot feed back into it
 
   /* --------------------------------------------------------------------- ui */
@@ -362,35 +363,27 @@
     return rights || "-";
   }
 
-  // How much of the main line the board is showing: chess.com marks the ply you
-  // browsed to, and with nothing marked the list's own end is on the board.
+  // The plies the board is showing: chess.com marks the ply you browsed to, and
+  // with nothing marked the list's own end is on the board.
   function chessComShownPlies(placement) {
     const plies = [...document.querySelectorAll(".main-line-ply")];
     const selected = plies.findIndex((ply) => ply.querySelector(".selected"));
-    if (selected !== -1) return selected + 1;
+    if (selected !== -1) return plies.slice(0, selected + 1);
     // Unmarked, the board shows the end of the line, unless it still shows the
     // position the game or analysis started from.
-    return placement === START_PLACEMENT ? 0 : plies.length;
+    return placement === START_PLACEMENT ? [] : plies;
   }
 
   // Which sides have moved their king in the plies shown: a king move or a
-  // castle both use the right up for good. Browsing back before the king moved
-  // must keep the right, so plies after the shown one are ignored. They
-  // alternate white then black, the same order the turn estimator counts them.
+  // castle both use the right up for good, so plies after the shown one must
+  // not count.
   function chessComKingsMoved(shown) {
     const moved = {};
-    [...document.querySelectorAll(".main-line-ply")].slice(0, shown).forEach((node, index) => {
+    for (const node of shown) {
       const san = node.textContent.trim();
-      if (!san.startsWith("K") && !san.startsWith("O-O")) return;
-      const side = node.classList.contains("white-move")
-        ? "w"
-        : node.classList.contains("black-move")
-          ? "b"
-          : index % 2 === 0
-            ? "w"
-            : "b";
-      moved[side] = true;
-    });
+      if (!san.startsWith("K") && !san.startsWith("O-O")) continue;
+      moved[node.classList.contains("white-move") ? "w" : "b"] = true;
+    }
     return moved;
   }
 
@@ -418,7 +411,7 @@
 
     const shown = chessComShownPlies(placement);
     // With no clock and no moves played yet, the start position is white's.
-    const turn = chessComTurn(shown) ?? (placement === START_PLACEMENT ? "w" : null);
+    const turn = chessComTurn(shown.length) ?? (placement === START_PLACEMENT ? "w" : null);
     return {
       fen: `${placement} ${turn ?? sideHint ?? "w"} ${castlingFromPlacement(placement, chessComKingsMoved(shown))} - 0 1`,
       turnKnown: turn !== null,
@@ -551,7 +544,6 @@
     boardResize.disconnect();
     if (board) boardResize.observe(board);
   }
-
 
   function detect() {
     return boardFromFen() ?? boardFromSquares() ?? boardFromChessCom() ?? boardFromLichess();
@@ -1014,9 +1006,7 @@
       return;
     }
 
-    // chess.com paints the pieces and the mark on the shown ply a moment apart,
-    // so an immediate read can see the new position with the old ply marked.
-    armSettle(fen);
+    if (document.querySelector(".main-line-ply")) watchMoveList();
 
     if (force || fen !== wantedFen) {
       wantedFen = fen;
@@ -1032,17 +1022,26 @@
     refreshTimer = window.setTimeout(() => refresh(), DEBOUNCE_MS);
   }
 
-  // The move list marks the shown ply a tick after the pieces move, so read
-  // again shortly after and keep the settled answer. Stops once the read stops
-  // changing, which keeps it from looping.
-  function armSettle(fen) {
-    window.clearTimeout(settleTimer);
-    settleTimer = window.setTimeout(() => {
-      settleTimer = 0;
-      if (!enabled) return;
-      const again = detect();
-      if (again && again.fen !== fen) refresh();
-    }, 200);
+  // Browsing marks the ply you landed on with a class on its span, and the mark
+  // can move before the pieces follow, so wake on the mark moving and read once
+  // more after the board has had time to catch up.
+  function watchMoveList() {
+    if (moveListWatch) return;
+    let marked = null;
+    moveListWatch = new MutationObserver(() => {
+      const next = document.querySelector(".main-line-ply .selected");
+      if (next === marked) return;
+      marked = next;
+      schedule();
+      window.clearTimeout(markTimer);
+      markTimer = window.setTimeout(refresh, 200);
+    });
+    moveListWatch.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["class"],
+    });
   }
 
   function toggle(next) {
