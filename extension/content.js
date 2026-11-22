@@ -34,7 +34,12 @@
   if (window.__bestMoveOverlay) return;
   window.__bestMoveOverlay = true;
 
-  const MOVETIME_MS = 1200;
+  // The overlay should read like a strong human, not a machine. It plays at a
+  // 2400 rating and does not always hand back the engine's favourite move.
+  const HUMAN_ELO = 2400;
+  const CANDIDATES = 4; // lines the engine reports, so a worse one can be chosen
+  const MOVETIME_MS = 900; // the middle of the think time; each position varies
+  const MOVETIME_JITTER = 500;
   const DEBOUNCE_MS = 220;
   const ENGINE_SCRIPT = "engine/stockfish-19-single.js";
   const ENGINE_WASM = "engine/stockfish-19-single.wasm";
@@ -61,6 +66,8 @@
   let best = null; // { label, uci, from, to, glyph, evalText, depth, note }
   let liveDepth = 0;
   let liveScore = null;
+  let candidates = new Map(); // multipv index -> { uci, score, depth }
+  const pickCache = new Map(); // fen -> the move it was already given
   let lastPaint = 0;
   let refreshTimer = 0;
 
@@ -168,7 +175,7 @@
         <button data-side="b">Black</button>
       </div>
       <div class="note" hidden></div>
-      <div class="foot">Stockfish 19 · local · Alt+B</div>
+      <div class="foot">Stockfish 19 · ~2400 · Alt+B</div>
     </div>
   `;
 
@@ -649,9 +656,13 @@
         }
         post("setoption name Threads value 1");
         post("setoption name Hash value 256");
-        post("setoption name MultiPV value 1");
+        post(`setoption name MultiPV value ${CANDIDATES}`);
         post("setoption name Skill Level value 20");
-        post("setoption name UCI_LimitStrength value false");
+        // Build strength instead of engine strength: LimitStrength with an Elo
+        // makes Stockfish pick like a player of that rating, so even its top
+        // line is only as good as a 2400's.
+        post("setoption name UCI_LimitStrength value true");
+        post(`setoption name UCI_Elo value ${HUMAN_ELO}`);
         post("setoption name Ponder value false");
         post("ucinewgame");
         post("isready");
@@ -688,7 +699,15 @@
     if (!depthMatch && !scoreMatch) return;
 
     if (depthMatch) liveDepth = Number(depthMatch[1]);
-    if (scoreMatch) liveScore = { type: scoreMatch[1], value: Number(scoreMatch[2]) };
+    if (scoreMatch) {
+      const score = { type: scoreMatch[1], value: Number(scoreMatch[2]) };
+      const index = Number(/\bmultipv (\d+)/.exec(line)?.[1] ?? 1);
+      const pv = /\bpv (\S+)/.exec(line)?.[1];
+      // The card follows the top line while it thinks; the others are kept so a
+      // move a 2400 might actually play can be suggested instead.
+      if (index === 1) liveScore = score;
+      if (pv) candidates.set(index, { uci: pv, score, depth: liveDepth });
+    }
 
     const now = performance.now();
     if (now - lastPaint < 140) return;
@@ -714,7 +733,12 @@
       return;
     }
 
-    if (uci) {
+    // Not always the engine's favourite: a 2400 misses the best move sometimes,
+    // and advice that comes back identical every time gives the overlay away.
+    const picked = uci ? rememberPick(fen) : null;
+    if (picked) {
+      best = describe(fen, picked.uci, picked.score, picked.depth || liveDepth);
+    } else if (uci) {
       best = describe(fen, uci, liveScore, liveDepth);
     } else {
       best = null;
@@ -737,13 +761,14 @@
     searching = true;
     liveScore = null;
     liveDepth = 0;
+    candidates = new Map();
     best = null;
     engineNote = "";
     render();
     paintHighlights();
 
     post(`position fen ${wantedFen}`);
-    post(`go movetime ${MOVETIME_MS}`);
+    post(`go movetime ${thinkTime(wantedFen)}`);
   }
 
   function fail(message) {
@@ -781,6 +806,100 @@
   }
 
   /* --------------------------------------------------------------- helpers */
+
+  /* ------------------------------------------------- playing like a 2400 */
+
+  // A cheap stable hash, so one position always gets one treatment: browsing
+  // back and forth must not change the suggestion or how long it "takes".
+  function fenSeed(fen) {
+    let h = 2166136261;
+    for (let i = 0; i < fen.length; i += 1) {
+      h ^= fen.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  function drawn(seed, salt) {
+    let x = (seed ^ Math.imul(salt, 0x9e3779b1)) >>> 0;
+    x ^= x << 13;
+    x >>>= 0;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    return (x >>> 0) / 4294967296;
+  }
+
+  function centipawns(score) {
+    if (!score) return 0;
+    if (score.type === "mate") {
+      return score.value >= 0 ? 100000 - score.value * 1000 : -100000 - score.value * 1000;
+    }
+    return score.value;
+  }
+
+  // How far from the best move to look is itself a dice roll: most of the time a
+  // 2400 keeps to good moves, now and then it takes a slightly worse one it
+  // likes the look of, and occasionally it plays a real slip. The draw comes
+  // from the position, so the same board always gets the same answer.
+  function humanPick(fen) {
+    const lines = [...candidates.values()]
+      .filter((line) => line.depth >= liveDepth - 1)
+      .sort((a, b) => centipawns(b.score) - centipawns(a.score));
+    if (!lines.length) return null;
+
+    const seed = fenSeed(fen);
+    const roll = drawn(seed, 1);
+    const slack = roll < 0.05 ? 150 : roll < 0.18 ? 60 : 25;
+    const top = centipawns(lines[0].score);
+
+    // A forced mate is not something a human gives up for a quiet move.
+    const mates = lines.filter((line) => line.score.type === "mate" && line.score.value > 0);
+    const pool = mates.length
+      ? mates
+      : lines.filter((line) => top - centipawns(line.score) <= slack);
+    if (!pool.length) return lines[0];
+
+    // Now and then the pick is just one of the ideas that looked playable. This
+    // is the loose move a 2400 still makes sometimes: weighting alone lands back
+    // on the best move far too often to look like a person.
+    if (!mates.length && drawn(seed, 4) < 0.04) {
+      return pool[Math.floor(drawn(seed, 5) * pool.length)] ?? pool[0];
+    }
+
+    // Otherwise near-equal moves share the weight, with the engine's own
+    // favourite still leading: that is what a strong human mostly plays anyway.
+    const weights = pool.map((line) => Math.exp(-Math.max(0, top - centipawns(line.score)) / 9));
+    const total = weights.reduce((sum, weight) => sum + weight, 0);
+    let target = drawn(seed, 2) * total;
+    for (let i = 0; i < pool.length; i += 1) {
+      target -= weights[i];
+      if (target <= 0) return pool[i];
+    }
+    return pool[0];
+  }
+
+  // Advice already given is not taken back a few seconds later: the engine's own
+  // randomness can move on between searches, but the same board keeps the same
+  // suggestion. Only the newest few hundred positions are kept.
+  function rememberPick(fen) {
+    const seen = pickCache.get(fen);
+    if (seen) {
+      const live = [...candidates.values()].find((line) => line.uci === seen.uci);
+      return live ?? seen;
+    }
+
+    const pick = humanPick(fen);
+    if (!pick) return null;
+    if (pickCache.size >= 300) pickCache.delete(pickCache.keys().next().value);
+    pickCache.set(fen, pick);
+    return pick;
+  }
+
+  // People do not spend the same time on every move either.
+  function thinkTime(fen) {
+    const spread = MOVETIME_MS - MOVETIME_JITTER / 2;
+    return Math.round(spread + drawn(fenSeed(fen), 3) * MOVETIME_JITTER);
+  }
 
   function formatScore(score) {
     if (!score) return "";
