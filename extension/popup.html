@@ -118,6 +118,31 @@
         font-size: 10.5px;
         color: #5d6878;
       }
+      .ladder {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin-top: 11px;
+        padding-top: 9px;
+        border-top: 1px solid #1c2431;
+      }
+      .ladder .elo {
+        font-size: 17px;
+        color: #f0e2c2;
+      }
+      .ladder .record {
+        margin-left: auto;
+        font-size: 10.5px;
+        color: #8d99aa;
+      }
+      .row {
+        display: flex;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      .row button {
+        flex: 1;
+      }
       [hidden] {
         display: none !important;
       }
@@ -134,10 +159,21 @@
     <div class="actions" id="allow-row" hidden>
       <button type="button" class="primary" id="allow">Allow this site</button>
     </div>
+    <div class="ladder">
+      <span class="elo" id="elo">800</span>
+      <span class="record" id="record">0W 0L 0D</span>
+    </div>
+    <div class="row" id="results">
+      <button type="button" data-outcome="win" title="Log a game it won">Won</button>
+      <button type="button" data-outcome="draw" title="Log a drawn game">Drew</button>
+      <button type="button" data-outcome="loss" title="Log a game it lost">Lost</button>
+      <button type="button" id="reset" title="Back to 800">Reset</button>
+    </div>
     <footer>
       <button type="button" id="options">Allowed sites</button>
       <span class="hint">Alt+B toggles</span>
     </footer>
+    <script src="ladder.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

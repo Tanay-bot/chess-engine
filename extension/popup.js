@@ -14,6 +14,8 @@ const moveEl = document.getElementById("move");
 const noteEl = document.getElementById("note");
 const allowRow = document.getElementById("allow-row");
 const allowButton = document.getElementById("allow");
+const eloEl = document.getElementById("elo");
+const recordEl = document.getElementById("record");
 
 let pendingAllow = null;
 
@@ -200,6 +202,28 @@ async function main() {
     clearTimeout(watchdog);
   }
 }
+
+// The ladder is the overlay's own rating: log what happened and the page it runs
+// on picks the new strength up through storage, mid-session.
+async function showLadder() {
+  const state = await BestMoveLadder.read();
+  eloEl.textContent = String(state.elo);
+  recordEl.textContent = `${state.wins}W ${state.losses}L ${state.draws}D`;
+}
+
+for (const button of document.querySelectorAll("[data-outcome]")) {
+  button.addEventListener("click", async () => {
+    await BestMoveLadder.record(button.dataset.outcome);
+    await showLadder();
+  });
+}
+
+document.getElementById("reset").addEventListener("click", async () => {
+  await BestMoveLadder.reset();
+  await showLadder();
+});
+
+showLadder().catch(() => {});
 
 allowButton.addEventListener("click", allow);
 

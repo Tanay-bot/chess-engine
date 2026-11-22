@@ -54,7 +54,7 @@ async function applyContentScript() {
     {
       id: SCRIPT_ID,
       matches: patterns,
-      js: ["content.js"],
+      js: ["ladder.js", "content.js"],
       runAt: "document_idle",
     },
   ]);
@@ -68,6 +68,26 @@ function syncQuietly() {
 
 chrome.runtime.onInstalled.addListener(syncQuietly);
 chrome.runtime.onStartup.addListener(syncQuietly);
+
+/**
+ * A reload keeps the previous registration until something syncs it, which would
+ * leave tabs on an older script list (the overlay would run without ladder.js).
+ * Checked once per worker start, and only written when the list is out of date.
+ */
+async function ensureRegisteredScripts() {
+  const wanted = ["ladder.js", "content.js"];
+  try {
+    const [registered] = await chrome.scripting.getRegisteredContentScripts({ ids: [SCRIPT_ID] });
+    if (!registered) return;
+    const current = registered.js ?? [];
+    if (current.length === wanted.length && wanted.every((file, index) => current[index] === file)) return;
+    await syncContentScript();
+  } catch {
+    // Nothing registered yet, or the browser refused: the normal sync covers it.
+  }
+}
+
+ensureRegisteredScripts();
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.allowedSites) syncQuietly();

@@ -34,9 +34,8 @@
   if (window.__bestMoveOverlay) return;
   window.__bestMoveOverlay = true;
 
-  // The overlay should read like a strong human, not a machine. It plays at a
-  // 2400 rating and does not always hand back the engine's favourite move.
-  const HUMAN_ELO = 2400;
+  // The overlay starts where a new account starts and climbs from there; the
+  // rating itself lives in ladder.js, so the popup and the page share one number.
   const CANDIDATES = 4; // lines the engine reports, so a worse one can be chosen
   const MOVETIME_MS = 900; // the middle of the think time; each position varies
   const MOVETIME_JITTER = 500;
@@ -48,6 +47,12 @@
   const PIECE_NAME = { p: "Pawn", n: "Knight", b: "Bishop", r: "Rook", q: "Queen", k: "King" };
 
   let enabled = true;
+  let ladder = { elo: 800, wins: 0, losses: 0, draws: 0 };
+  let resultKey = ""; // the page whose result has already been counted
+  let resultCheck = 0;
+  // A tab can still be running the registration from before ladder.js existed:
+  // the overlay keeps working then, it just has no rating to climb.
+  const ladderStore = window.BestMoveLadder ?? null;
   let worker = null;
   let engineBlob = null;
   let engineStatus = "idle"; // idle | loading | ready | error
@@ -178,7 +183,7 @@
         <button data-side="b">Black</button>
       </div>
       <div class="note" hidden></div>
-      <div class="foot">Stockfish 19 · ~2400 · Alt+B</div>
+      <div class="foot">Stockfish 19 · 800 · Alt+B</div>
     </div>
   `;
 
@@ -192,6 +197,7 @@
   const depthEl = root.querySelector(".depth");
   const sideEl = root.querySelector(".side");
   const noteEl = root.querySelector(".note");
+  const footEl = root.querySelector(".foot");
 
   const highlights = document.createElement("div");
   highlights.style.cssText =
@@ -659,13 +665,14 @@
         }
         post("setoption name Threads value 1");
         post("setoption name Hash value 256");
+        const tune = strength();
         post(`setoption name MultiPV value ${CANDIDATES}`);
-        post("setoption name Skill Level value 20");
+        post(`setoption name Skill Level value ${tune.skill}`);
         // Build strength instead of engine strength: LimitStrength with an Elo
-        // makes Stockfish pick like a player of that rating, so even its top
-        // line is only as good as a 2400's.
-        post("setoption name UCI_LimitStrength value true");
-        post(`setoption name UCI_Elo value ${HUMAN_ELO}`);
+        // makes Stockfish pick like a player of that rating. It has no Elo below
+        // 1320, so the beginner end leans on Skill Level and a wider net.
+        post(`setoption name UCI_LimitStrength value ${tune.limit}`);
+        if (tune.limit) post(`setoption name UCI_Elo value ${tune.elo}`);
         post("setoption name Ponder value false");
         post("ucinewgame");
         post("isready");
@@ -799,6 +806,64 @@
     post(`go movetime ${thinkTime(wantedFen)}`);
   }
 
+  // A ladder change while the engine is warm: send the new options and look at
+  // the board again, instead of waiting for the next reload.
+  function applyStrength() {
+    if (engineStatus !== "ready") return;
+    const tune = strength();
+    post(`setoption name Skill Level value ${tune.skill}`);
+    post(`setoption name UCI_LimitStrength value ${tune.limit}`);
+    if (tune.limit) post(`setoption name UCI_Elo value ${tune.elo}`);
+    startSearch();
+  }
+
+  /* --------------------------------------------------------------- results */
+
+  // The page's own verdict, when it shows one. "You won" needs no colour; a bare
+  // scoreline does, so it is only read when the board says which side you are.
+  const RESULT_NODES = [".game-over-modal-content", ".game-result", ".result-text", ".status", ".result"];
+
+  function boardSide() {
+    const board = chessComBoard();
+    if (board) return board.classList.contains("flipped") ? "b" : "w";
+    const wrap = document.querySelector(".cg-wrap");
+    if (wrap?.classList.contains("orientation-black")) return "b";
+    if (wrap?.classList.contains("orientation-white")) return "w";
+    return null;
+  }
+
+  function pageOutcome() {
+    for (const selector of RESULT_NODES) {
+      for (const node of document.querySelectorAll(selector)) {
+        const text = node.textContent.replace(/\s+/g, " ").trim().toLowerCase();
+        if (!text || text.length > 80) continue;
+        if (/\byou won\b/.test(text)) return "win";
+        if (/\byou lost\b/.test(text)) return "loss";
+        if (/\bdraw\b|½-½|1\/2-1\/2/.test(text)) return "draw";
+        const score = /\b([01])-([01])\b/.exec(text);
+        const side = score ? boardSide() : null;
+        if (score && side) return (score[1] === "1" ? "w" : "b") === side ? "win" : "loss";
+      }
+    }
+    return null;
+  }
+
+  // One result per page: a banner re-rendering, or a reload, must not climb the
+  // ladder twice, and an analysis page is an old game, so it never counts.
+  function noteOutcome() {
+    const now = performance.now();
+    if (now - resultCheck < 1500) return;
+    resultCheck = now;
+    if (/\/analysis\b/.test(location.pathname)) return;
+
+    const outcome = pageOutcome();
+    if (!outcome) return;
+    const key = `${location.pathname}:${outcome}`;
+    if (key === resultKey) return;
+    resultKey = key;
+    if (ladderStore) ladderStore.record(outcome).catch(() => {});
+  }
+
   function fail(message) {
     engineStatus = "error";
     engineNote = message;
@@ -835,7 +900,22 @@
 
   /* --------------------------------------------------------------- helpers */
 
-  /* ------------------------------------------------- playing like a 2400 */
+  /* ---------------------------------------------- playing like its rating */
+
+  // What a rating means in engine terms: the weaker the ladder rung, the lower
+  // the Skill Level, the wider the net in humanPick and the flatter its weights.
+  function strength() {
+    const span = Math.max(0, Math.min(1, (ladder.elo - 800) / 2000));
+    const beginner = ladder.elo < 1320;
+    return {
+      skill: beginner ? Math.max(0, Math.round(((ladder.elo - 800) / 520) * 4)) : 20,
+      limit: !beginner,
+      elo: Math.min(3190, Math.max(1320, Math.round(ladder.elo))),
+      slack: Math.round(300 - 200 * span),
+      slip: 0.28 - 0.22 * span,
+      sigma: 12 - 7 * span,
+    };
+  }
 
   // A cheap stable hash, so one position always gets one treatment: browsing
   // back and forth must not change the suggestion or how long it "takes".
@@ -877,28 +957,29 @@
     const lines = [...unique.values()].sort((a, b) => centipawns(b.score) - centipawns(a.score));
     if (!lines.length) return null;
 
+    const tune = strength();
     const seed = fenSeed(fen);
-    const roll = drawn(seed, 1);
-    const slack = roll < 0.05 ? 150 : roll < 0.18 ? 60 : 25;
     const top = centipawns(lines[0].score);
+    const loose = drawn(seed, 1) < tune.slip;
 
     // A forced mate is not something a human gives up for a quiet move.
     const mates = lines.filter((line) => line.score.type === "mate" && line.score.value > 0);
     const pool = mates.length
       ? mates
-      : lines.filter((line) => top - centipawns(line.score) <= slack);
+      : lines.filter(
+          (line) => top - centipawns(line.score) <= (loose ? tune.slack : Math.min(25, tune.slack)),
+        );
     if (!pool.length) return lines[0];
 
-    // Now and then the pick is just one of the ideas that looked playable. This
-    // is the loose move a 2400 still makes sometimes: weighting alone lands back
-    // on the best move far too often to look like a person.
-    if (!mates.length && drawn(seed, 4) < 0.04) {
+    // Now and then the pick is just one of the ideas that looked playable: the
+    // loose move a beginner makes all the time and a 2400 only rarely.
+    if (!mates.length && loose) {
       return pool[Math.floor(drawn(seed, 5) * pool.length)] ?? pool[0];
     }
 
     // Otherwise near-equal moves share the weight, with the engine's own
     // favourite still leading: that is what a strong human mostly plays anyway.
-    const weights = pool.map((line) => Math.exp(-Math.max(0, top - centipawns(line.score)) / 9));
+    const weights = pool.map((line) => Math.exp(-Math.max(0, top - centipawns(line.score)) / tune.sigma));
     const total = weights.reduce((sum, weight) => sum + weight, 0);
     let target = drawn(seed, 2) * total;
     for (let i = 0; i < pool.length; i += 1) {
@@ -1036,6 +1117,7 @@
   function render() {
     card.hidden = !enabled;
     if (!enabled) return;
+    footEl.textContent = `Stockfish 19 · ${ladder.elo} · Alt+B`;
 
     const dotState =
       engineStatus === "error"
@@ -1164,6 +1246,7 @@
 
     render();
     paintHighlights();
+    noteOutcome();
   }
 
   function schedule() {
@@ -1254,5 +1337,19 @@
     enabled = value.enabled !== false;
     render();
     if (enabled) refresh(true);
+  });
+
+  ladderStore?.read().then((state) => {
+    ladder = state;
+    render();
+  });
+
+  // The popup is the other writer, so a game logged there has to change the
+  // strength of the search that is already running, not wait for a reload.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !changes.ladder) return;
+    ladder = changes.ladder.newValue ?? ladder;
+    applyStrength();
+    render();
   });
 })();
