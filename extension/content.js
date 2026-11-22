@@ -1023,8 +1023,9 @@
   }
 
   // Browsing marks the ply you landed on with a class on its span, and the mark
-  // can move before the pieces follow, so wake on the mark moving and read once
-  // more after the board has had time to catch up.
+  // moves before the pieces do: reading it at once pairs the new mark with the
+  // old board and revokes a right the board still shows. So only note the mark
+  // and read after the pieces have had time to follow.
   function watchMoveList() {
     if (moveListWatch) return;
     let marked = null;
@@ -1032,7 +1033,6 @@
       const next = document.querySelector(".main-line-ply .selected");
       if (next === marked) return;
       marked = next;
-      schedule();
       window.clearTimeout(markTimer);
       markTimer = window.setTimeout(refresh, 200);
     });
