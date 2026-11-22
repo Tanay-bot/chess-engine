@@ -66,7 +66,10 @@
   let best = null; // { label, uci, from, to, glyph, evalText, depth, note }
   let liveDepth = 0;
   let liveScore = null;
-  let candidates = new Map(); // multipv index -> { uci, score, depth }
+  let candidates = new Map(); // multipv index -> { uci, score, depth }, last whole set
+  let candidateDepth = 0;
+  let pending = new Map(); // the iteration still being reported
+  let pendingDepth = 0;
   const pickCache = new Map(); // fen -> the move it was already given
   let lastPaint = 0;
   let refreshTimer = 0;
@@ -698,7 +701,9 @@
     const scoreMatch = /\bscore (cp|mate) (-?\d+)/.exec(line);
     if (!depthMatch && !scoreMatch) return;
 
-    if (depthMatch) liveDepth = Number(depthMatch[1]);
+    const depth = depthMatch ? Number(depthMatch[1]) : liveDepth;
+    if (depth > liveDepth) liveDepth = depth;
+
     if (scoreMatch) {
       const score = { type: scoreMatch[1], value: Number(scoreMatch[2]) };
       const index = Number(/\bmultipv (\d+)/.exec(line)?.[1] ?? 1);
@@ -706,7 +711,21 @@
       // The card follows the top line while it thinks; the others are kept so a
       // move a 2400 might actually play can be suggested instead.
       if (index === 1) liveScore = score;
-      if (pv) candidates.set(index, { uci: pv, score, depth: liveDepth });
+      if (pv) {
+        // Every iteration reports its lines one at a time and the last one is
+        // often cut off by the time limit, so hold the newest set aside and only
+        // keep it once the next depth proves it was reported whole. Otherwise a
+        // single line would stand in for a choice of four.
+        if (depth > pendingDepth) {
+          if (pending.size >= 2) {
+            candidates = pending;
+            candidateDepth = pendingDepth;
+          }
+          pending = new Map();
+          pendingDepth = depth;
+        }
+        if (depth === pendingDepth) pending.set(index, { uci: pv, score, depth });
+      }
     }
 
     const now = performance.now();
@@ -731,6 +750,12 @@
     if (wantedFen !== fen) {
       startSearch();
       return;
+    }
+
+    // A finished search may still have left its last iteration half reported.
+    if (pending.size >= 2 && pendingDepth >= candidateDepth) {
+      candidates = pending;
+      candidateDepth = pendingDepth;
     }
 
     // Not always the engine's favourite: a 2400 misses the best move sometimes,
@@ -762,6 +787,9 @@
     liveScore = null;
     liveDepth = 0;
     candidates = new Map();
+    candidateDepth = 0;
+    pending = new Map();
+    pendingDepth = 0;
     best = null;
     engineNote = "";
     render();
@@ -842,9 +870,11 @@
   // likes the look of, and occasionally it plays a real slip. The draw comes
   // from the position, so the same board always gets the same answer.
   function humanPick(fen) {
-    const lines = [...candidates.values()]
-      .filter((line) => line.depth >= liveDepth - 1)
-      .sort((a, b) => centipawns(b.score) - centipawns(a.score));
+    const unique = new Map();
+    for (const line of candidates.values()) {
+      if (line.depth >= candidateDepth && !unique.has(line.uci)) unique.set(line.uci, line);
+    }
+    const lines = [...unique.values()].sort((a, b) => centipawns(b.score) - centipawns(a.score));
     if (!lines.length) return null;
 
     const seed = fenSeed(fen);
